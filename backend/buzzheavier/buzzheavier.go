@@ -124,6 +124,19 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		// Resolve (and create if needed) the root directory, cache its ID.
 		rootID, err := f.findOrCreateDir(ctx, f.root)
 		if err != nil {
+			if err == fs.ErrorIsFile {
+				f.root = path.Dir(f.root)
+				if f.root == "." || f.root == "/" {
+					f.root = ""
+				}
+				// Retry with the parent directory
+				rootID, err = f.findOrCreateDir(ctx, f.root)
+				if err != nil {
+					return nil, err
+				}
+				f.rootID = rootID
+				return f, fs.ErrorIsFile
+			}
 			return nil, fmt.Errorf("failed to resolve root directory %q: %w", f.root, err)
 		}
 		f.rootID = rootID
@@ -137,8 +150,8 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 func (f *Fs) Name() string             { return f.name }
 func (f *Fs) Root() string             { return f.root }
 func (f *Fs) Precision() time.Duration { return time.Second }
-func (f *Fs) Hashes() hash.Set        { return hash.Set(hash.None) }
-func (f *Fs) Features() *fs.Features  { return f.features }
+func (f *Fs) Hashes() hash.Set         { return hash.Set(hash.None) }
+func (f *Fs) Features() *fs.Features   { return f.features }
 func (f *Fs) String() string           { return fmt.Sprintf("buzzheavier root '%s'", f.root) }
 
 // List the objects and directories in dir into entries.
@@ -183,8 +196,10 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Requires authentication; returns a clear error when used anonymously.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if f.opt.AccountID == "" {
-		return nil, fmt.Errorf("buzzheavier: cannot look up %q without account_id — "+
-			"anonymous files can only be accessed via their upload link", remote)
+		// Without authentication we cannot check whether the file exists,
+		// so tell rclone "not found" so it proceeds to upload via Put().
+		fs.Debugf(f, "NewObject(%q): no account_id, returning ObjectNotFound", remote)
+		return nil, fs.ErrorObjectNotFound
 	}
 
 	dir := path.Dir(remote)
@@ -263,9 +278,9 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		modTime: src.ModTime(ctx),
 	}
 
-	// Always surface the public link. For anonymous users this is the ONLY
-	// record of where the file lives. -v or --log-level INFO will show it.
-	fs.Infof(obj, "Uploaded successfully — public link: %s", obj.publicURL())
+	// Always surface the public link at NOTICE level.
+	// For anonymous users this is the ONLY record of where the file lives.
+	fs.Logf(obj, "Uploaded successfully — public link: %s", obj.publicURL())
 
 	return obj, nil
 }
@@ -278,10 +293,13 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 // file ID without an account. For anonymous files, the link was printed
 // when the file was uploaded.
 func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
+	if f.opt.AccountID == "" {
+		return "", fmt.Errorf("buzzheavier: link requires account_id — " +
+			"the link was printed when the file was uploaded")
+	}
 	o, err := f.NewObject(ctx, remote)
 	if err != nil {
-		return "", fmt.Errorf("buzzheavier: link requires account_id — "+
-			"the link was printed when the file was uploaded: %w", err)
+		return "", err
 	}
 	return o.(*Object).publicURL(), nil
 }

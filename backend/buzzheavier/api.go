@@ -50,10 +50,16 @@ type FsDirResponse struct {
 	Data fsDirData `json:"data"`
 }
 
-// UploadResponse is the JSON response from a PUT upload
-type UploadResponse struct {
+// uploadData is the inner object from the upload response.
+type uploadData struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// UploadResponse is the JSON response from a PUT upload.
+// The API returns: {"code":201, "data": {"id":"...", "name":"...", ...}}
+type UploadResponse struct {
+	Data uploadData `json:"data"`
 }
 
 // CreateDirRequest is the body for POST /api/fs/{parentId}
@@ -145,14 +151,22 @@ func (f *Fs) dirIDForPath(ctx context.Context, relPath string) (string, error) {
 			return "", err
 		}
 		found := false
+		isFile := false
 		for _, item := range items {
-			if item.Name == part && item.IsDirectory {
-				currentID = item.ID
-				found = true
+			if item.Name == part {
+				if item.IsDirectory {
+					currentID = item.ID
+					found = true
+				} else {
+					isFile = true
+				}
 				break
 			}
 		}
 		if !found {
+			if isFile {
+				return "", fs.ErrorIsFile
+			}
 			return "", fs.ErrorDirNotFound
 		}
 	}
@@ -184,15 +198,23 @@ func (f *Fs) findOrCreateDir(ctx context.Context, absPath string) (string, error
 			return "", err
 		}
 		found := ""
+		isFile := false
 		for _, item := range items {
-			if item.Name == part && item.IsDirectory {
-				found = item.ID
+			if item.Name == part {
+				if item.IsDirectory {
+					found = item.ID
+				} else {
+					isFile = true
+				}
 				break
 			}
 		}
 		if found != "" {
 			currentID = found
 			continue
+		}
+		if isFile {
+			return "", fs.ErrorIsFile
 		}
 		// Create missing directory
 		newID, err := f.createDir(ctx, currentID, part)
@@ -282,7 +304,7 @@ func (f *Fs) uploadFile(ctx context.Context, uploadURL string, in io.Reader, siz
 				return false, fmt.Errorf("failed to parse upload response: %w", err)
 			}
 		}
-		fileID = result.ID
+		fileID = result.Data.ID
 		return false, nil
 	})
 	return fileID, err
